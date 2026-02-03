@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from models import TransactionMsg
+from models.transaction import TransactionMsg
 
 app = FastAPI()
 
