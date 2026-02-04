@@ -37,7 +37,7 @@ async def load_test(scenario: int = 1):
 
         await asyncio.sleep(0.5)
 
-        async with session.get(f"{FACADE_SERVICE_URL}/time_taken") as response:
+        async with session.get(f"{FACADE_SERVICE_URL}/time-taken") as response:
             services_time = await response.json()
         
         async with session.get(f"{FACADE_SERVICE_URL}/accounts") as response:
@@ -51,7 +51,11 @@ async def load_test(scenario: int = 1):
     
     rps = 100000 / total_time
     
-    return {"total_time": total_time, "rps": rps, "logging_time": services_time.get("logging_time"), "counter_time": services_time.get("counter_time"), "correct": correct}
+    return {"total_time": round(total_time, 2), 
+            "rps": round(rps, 1), 
+            "logging_time": round(services_time.get("logging_time"), 2), 
+            "counter_time": round(services_time.get("counter_time"), 2), 
+            "correct": correct}
 
 async def main():
     async with aiohttp.ClientSession() as session:

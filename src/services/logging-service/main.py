@@ -12,7 +12,7 @@ def save_message(transaction_data: TransactionMsg):
 
 @app.get("/user/{user_id}")
 def get_messages(user_id: int):
-    result = [transaction for transaction in transactions.values() if transaction["user_id"] == user_id]
+    result = [{"transaction_id": transaction_id, "amount": details.get("amount")} for transaction_id, details in transactions.items() if details["user_id"] == user_id]
     return result
 
 @app.delete("/state")

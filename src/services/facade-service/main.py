@@ -114,3 +114,5 @@ async def clear_up():
 
     await asyncio.gather(send_clear_up(session, f"{LOGGING_SERVICE_URL}/state"),
                          send_clear_up(session, f"{COUNTER_SERVICE_URL}/state"))
+
+    return {"status": "Successfully cleared"}
