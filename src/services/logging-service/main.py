@@ -14,3 +14,7 @@ def save_message(transaction_data: TransactionMsg):
 def get_messages(user_id: int):
     result = [transaction for transaction in transactions.values() if transaction["user_id"] == user_id]
     return result
+
+@app.delete("/state")
+async def clear_up():
+    transactions.clear()
