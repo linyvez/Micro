@@ -1,0 +1,20 @@
+from fastapi import FastAPI
+from src.models.transaction import TransactionMsg
+
+app = FastAPI()
+
+transactions = {}
+
+@app.post("/logs")
+def save_message(transaction_data: TransactionMsg):
+    transactions[transaction_data.transaction_id] = {"user_id": transaction_data.user_id, "amount": transaction_data.amount}
+    return transaction_data.transaction_id
+
+@app.get("/user/{user_id}")
+def get_messages(user_id: int):
+    result = [{"transaction_id": transaction_id, "amount": details.get("amount")} for transaction_id, details in transactions.items() if details["user_id"] == user_id]
+    return result
+
+@app.delete("/state")
+async def clear_up():
+    transactions.clear()

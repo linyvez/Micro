@@ -1,0 +1,24 @@
+services:
+  logging-service:
+    build: .
+    command: uvicorn src.services.logging-service.main:app --host 0.0.0.0 --port 8001 --no-access-log
+    ports:
+      - "8001:8001"
+
+  counter-service:
+    build: .
+    command: uvicorn src.services.counter-service.main:app --host 0.0.0.0 --port 8002 --no-access-log
+    ports:
+      - "8002:8002"
+
+  facade-service:
+    build: .
+    command: uvicorn src.services.facade-service.main:app --host 0.0.0.0 --port 8000 --no-access-log
+    ports:
+      - "8000:8000"
+    depends_on:
+      - logging-service
+      - counter-service
+    environment:
+      - LOGGING_URL=http://logging-service:8001
+      - COUNTER_URL=http://counter-service:8002
