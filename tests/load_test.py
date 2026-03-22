@@ -21,7 +21,7 @@ async def load_test(scenario: int = 1):
     по додаванню 1 на один і той самий рахунок. У результаті
     кінцеве значення балансу на одному рахунках має бути 100К.
     '''
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
         if scenario == 1:
             tasks = [client(i, session) for i in range(10)]
         elif scenario == 2:

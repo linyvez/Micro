@@ -1,15 +1,92 @@
 services:
-  logging-service:
+  hz-1:
+    image: hazelcast/hazelcast:latest
+    ports:
+      - "5701:5701"
+    environment:
+      - HZ_CLUSTERNAME=lab3
+      - HZ_NETWORK_PUBLICADDRESS=hz-1:5701
+      - HZ_NETWORK_JOIN_MULTICAST_ENABLED=false
+      - HZ_NETWORK_JOIN_TCP_IP_ENABLED=true
+      - HZ_NETWORK_JOIN_TCP_IP_MEMBER_LIST=hz-1,hz-2,hz-3
+
+  hz-2:
+    image: hazelcast/hazelcast:latest
+    ports:
+      - "5702:5701"
+    environment:
+      - HZ_CLUSTERNAME=lab3
+      - HZ_NETWORK_PUBLICADDRESS=hz-2:5701
+      - HZ_NETWORK_JOIN_MULTICAST_ENABLED=false
+      - HZ_NETWORK_JOIN_TCP_IP_ENABLED=true
+      - HZ_NETWORK_JOIN_TCP_IP_MEMBER_LIST=hz-1,hz-2,hz-3
+
+  hz-3:
+    image: hazelcast/hazelcast:latest
+    ports:
+      - "5703:5701"
+    environment:
+      - HZ_CLUSTERNAME=lab3
+      - HZ_NETWORK_PUBLICADDRESS=hz-3:5701
+      - HZ_NETWORK_JOIN_MULTICAST_ENABLED=false
+      - HZ_NETWORK_JOIN_TCP_IP_ENABLED=true
+      - HZ_NETWORK_JOIN_TCP_IP_MEMBER_LIST=hz-1,hz-2,hz-3
+
+  logging-service-1:
     build: .
     command: uvicorn src.services.logging-service.main:app --host 0.0.0.0 --port 8001 --no-access-log
     ports:
       - "8001:8001"
+    depends_on:
+      - hz-1
+      - hz-2
+      - hz-3
+
+  logging-service-2:
+    build: .
+    command: uvicorn src.services.logging-service.main:app --host 0.0.0.0 --port 8001 --no-access-log
+    ports:
+      - "8002:8001"
+    depends_on:
+      - hz-1
+      - hz-2
+      - hz-3
+
+  logging-service-3:
+    build: .
+    command: uvicorn src.services.logging-service.main:app --host 0.0.0.0 --port 8001 --no-access-log
+    ports:
+      - "8003:8001"
+    depends_on:
+      - hz-1
+      - hz-2
+      - hz-3
+
+  postgres:
+    image: postgres:latest
+    command: postgres -c max_connections=200
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=counter_db
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d counter_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   counter-service:
     build: .
     command: uvicorn src.services.counter-service.main:app --host 0.0.0.0 --port 8002 --no-access-log
     ports:
-      - "8002:8002"
+      - "8004:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://user:password@postgres:5432/counter_db
 
   facade-service:
     build: .
@@ -17,8 +94,10 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - logging-service
+      - logging-service-1
+      - logging-service-2
+      - logging-service-3
       - counter-service
     environment:
-      - LOGGING_URL=http://logging-service:8001
+      - LOGGING_URLS=http://logging-service-1:8001,http://logging-service-2:8001,http://logging-service-3:8001
       - COUNTER_URL=http://counter-service:8002

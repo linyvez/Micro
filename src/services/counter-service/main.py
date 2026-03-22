@@ -1,23 +1,43 @@
 from fastapi import FastAPI, HTTPException
 from src.models.transaction import TransactionMsg
-import asyncio
-from collections import defaultdict
+import asyncpg
+import os
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@postgres:5432/counter_db")
 
-users_balance = {}
-locks = defaultdict(asyncio.Lock)
+@asynccontextmanager
+async def lifespan(app):
+    app.state.pool = await asyncpg.create_pool(DATABASE_URL)
+
+    async with app.state.pool.acquire() as connection:
+        await connection.execute('''
+            CREATE TABLE IF NOT EXISTS users_balance (
+                user_id BIGINT PRIMARY KEY,
+                balance DOUBLE PRECISION NOT NULL DEFAULT 0.0
+            )
+        ''')
+    yield
+    await app.state.pool.close()
+
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/transaction")
 async def create_balance(data: TransactionMsg):
-    async with locks[data.user_id]:
-        balance = users_balance.get(data.user_id, 0)
-        users_balance[data.user_id] = balance + data.amount
-        return {"balance": users_balance[data.user_id]}
+    async with app.state.pool.acquire() as connection:
+        new_balance = await connection.fetchval("""
+            INSERT INTO users_balance (user_id, balance) VALUES ($1, $2) 
+            ON CONFLICT (user_id) DO UPDATE SET balance = users_balance.balance + EXCLUDED.balance 
+            RETURNING balance;
+        """, data.user_id, data.amount)
+
+    return {"balance": new_balance}
 
 @app.get("/user/{user_id}")
 async def get_balance(user_id: int):
-    result = users_balance.get(user_id)
+    async with app.state.pool.acquire() as connection:
+        result = await connection.fetchval("SELECT balance FROM users_balance WHERE user_id = $1", user_id)
+
     if result is not None:
         return result
     else:
@@ -25,9 +45,14 @@ async def get_balance(user_id: int):
 
 @app.get("/accounts")
 async def get_all_balances():
-    return users_balance
+    async with app.state.pool.acquire() as connection:
+        result = await connection.fetch("SELECT user_id, balance FROM users_balance")
+
+    return {user['user_id']: user['balance'] for user in result}
 
 @app.delete("/state")
 async def clear_up():
-    users_balance.clear()
-    locks.clear()
+    async with app.state.pool.acquire() as connection:
+        await connection.execute("TRUNCATE TABLE users_balance")
+    
+    return {"message": "Successfully cleared users_balance table."}

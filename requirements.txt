@@ -2,3 +2,5 @@ fastapi
 uvicorn
 aiohttp
 pydantic
+asyncpg
+hazelcast-python-client

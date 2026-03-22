@@ -4,6 +4,7 @@ import asyncio
 import aiohttp
 from contextlib import asynccontextmanager
 import os
+import random
 
 class MainSession:
     session: aiohttp.ClientSession = None
@@ -19,7 +20,7 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 
-LOGGING_SERVICE_URL = os.getenv("LOGGING_URL", "http://localhost:8001")
+LOGGING_SERVICE_URLS = os.getenv("LOGGING_URLS", "http://localhost:8001").split(",")
 COUNTER_SERVICE_URL = os.getenv("COUNTER_URL", "http://localhost:8002")
 
 logging_time = 0
@@ -27,18 +28,28 @@ counter_time = 0
 
 async def logging_service_wraper(session, request):
     global logging_time
-
     start = time.perf_counter()
-    async with session.post(url=f"{LOGGING_SERVICE_URL}/logs", json=request) as response:
-        status = response.status
-        data = await response.read()
 
-        end = time.perf_counter()
-        
-        time_taken = end - start
-        logging_time += time_taken
+    urls = LOGGING_SERVICE_URLS.copy()
+    random.shuffle(urls)
 
-        return status, data
+    for url in urls:
+        try:
+            async with session.post(url=f"{url}/logs", json=request) as response:
+                status = response.status
+                data = await response.read()
+
+                end = time.perf_counter()
+                
+                time_taken = end - start
+                logging_time += time_taken
+
+                return status, data
+        except aiohttp.ClientError:
+            print(f"[Facade] Logger {url} is down.", flush=True)
+            continue
+    
+    raise HTTPException(status_code=503, detail="All loggers are currently down.")
 
 async def counter_service_wraper(session, request):
     global counter_time
@@ -55,10 +66,20 @@ async def counter_service_wraper(session, request):
 
         return status, data
 
-async def get_data_wraper(session, url):
-    async with session.get(url) as response:
-        data = await response.json()
-        return response.status, data
+async def get_data_wraper(session, lst, path):
+    urls = lst.copy()
+    random.shuffle(urls)
+
+    for url in urls:
+        try:
+            async with session.get(url=f"{url}{path}") as response:
+                data = await response.json()
+                return response.status, data
+        except aiohttp.ClientError:
+            print(f"[Facade] {url} is down.", flush=True)
+            continue
+    
+    raise HTTPException(status_code=503, detail="Services are down.")
 
 @app.post("/")
 async def process_transaction(user_id: int, amount: float):
@@ -72,6 +93,8 @@ async def process_transaction(user_id: int, amount: float):
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    if isinstance(results[0], Exception):
+        raise HTTPException(status_code=503, detail="Loggers are unavailable")
     if isinstance(results[1], Exception):
         raise HTTPException(status_code=503, detail="Counter service unavailable")
 
@@ -86,9 +109,14 @@ async def process_transaction(user_id: int, amount: float):
 async def get_user_info(user_id: int):
     session = main_session.session
 
-    tasks = [get_data_wraper(session, f"{LOGGING_SERVICE_URL}/user/{user_id}"), get_data_wraper(session, f"{COUNTER_SERVICE_URL}/user/{user_id}")]
+    tasks = [get_data_wraper(session, LOGGING_SERVICE_URLS, f"/user/{user_id}"), get_data_wraper(session, [COUNTER_SERVICE_URL], f"/user/{user_id}")]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    if isinstance(results[0], Exception):
+        raise HTTPException(status_code=503, detail="Loggers are unavailable")
+    if isinstance(results[1], Exception):
+        raise HTTPException(status_code=503, detail="Counter service unavailable")
 
     (logging_status, logging_result), (counter_status, counter_result) = results
 
@@ -123,11 +151,19 @@ async def clear_up():
 
     session = main_session.session
 
-    async def send_clear_up(session, url):
-        async with session.delete(url=url) as response:
-            await response.read()
+    async def send_clear_up(session, lst, path):
+        urls = lst.copy()
+        random.shuffle(urls)
 
-    await asyncio.gather(send_clear_up(session, f"{LOGGING_SERVICE_URL}/state"),
-                         send_clear_up(session, f"{COUNTER_SERVICE_URL}/state"))
+        for url in urls:
+            try:
+                async with session.delete(url=f"{url}{path}") as response:
+                    await response.read()
+                    return
+            except aiohttp.ClientError:
+                continue
+
+    await asyncio.gather(send_clear_up(session, LOGGING_SERVICE_URLS, "/state"),
+                         send_clear_up(session, [COUNTER_SERVICE_URL], "/state"))
 
     return {"status": "Successfully cleared"}
