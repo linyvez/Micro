@@ -1,11 +1,40 @@
 from fastapi import FastAPI
-from src.models.transaction import TransactionMsg
+from src.models.models import TransactionMsg
 import hazelcast
+import asyncio
+import os
+import aiohttp
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-server:8003")
+MY_URL = os.getenv("MY_URL", "http://logging-service:8001")
+
+async def register_in_config():
+    info = {"service": "logging", "url": MY_URL}
+
+    async with aiohttp.ClientSession() as session:
+        for i in range(5):
+            try:
+                async with session.post(f"{CONFIG_SERVER_URL}/add_service", json=info) as response:
+                    if response.status == 200:
+                        print(f"Registered in config server")
+                        return
+            except aiohttp.ClientError:
+                print(f"Couldn't register on {i + 1} try")
+                await asyncio.sleep(2)
+        print("Didn't register in config after 5 attempts")
+
+@asynccontextmanager
+async def lifespan(app):
+    await register_in_config()
+
+    yield
+    client.shutdown()
+
+app = FastAPI(lifespan=lifespan)
 
 client = hazelcast.HazelcastClient(
-    cluster_name="lab3",
+    cluster_name="lab4",
     cluster_members=[
         "hz-1:5701",
         "hz-2:5701",

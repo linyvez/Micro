@@ -1,10 +1,18 @@
 services:
+  config-server:
+    build: .
+    command: uvicorn src.services.config-server.main:app --host 0.0.0.0 --port 8003 --no-access-log
+    ports:
+      - "8005:8003"
+    environment:
+      - CONFIG_SERVER_URL=http://config-server:8003
+
   hz-1:
     image: hazelcast/hazelcast:latest
     ports:
       - "5701:5701"
     environment:
-      - HZ_CLUSTERNAME=lab3
+      - HZ_CLUSTERNAME=lab4
       - HZ_NETWORK_PUBLICADDRESS=hz-1:5701
       - HZ_NETWORK_JOIN_MULTICAST_ENABLED=false
       - HZ_NETWORK_JOIN_TCP_IP_ENABLED=true
@@ -15,7 +23,7 @@ services:
     ports:
       - "5702:5701"
     environment:
-      - HZ_CLUSTERNAME=lab3
+      - HZ_CLUSTERNAME=lab4
       - HZ_NETWORK_PUBLICADDRESS=hz-2:5701
       - HZ_NETWORK_JOIN_MULTICAST_ENABLED=false
       - HZ_NETWORK_JOIN_TCP_IP_ENABLED=true
@@ -26,7 +34,7 @@ services:
     ports:
       - "5703:5701"
     environment:
-      - HZ_CLUSTERNAME=lab3
+      - HZ_CLUSTERNAME=lab4
       - HZ_NETWORK_PUBLICADDRESS=hz-3:5701
       - HZ_NETWORK_JOIN_MULTICAST_ENABLED=false
       - HZ_NETWORK_JOIN_TCP_IP_ENABLED=true
@@ -38,9 +46,13 @@ services:
     ports:
       - "8001:8001"
     depends_on:
+      - config-server
       - hz-1
       - hz-2
       - hz-3
+    environment:
+      - MY_URL=http://logging-service-1:8001
+      - CONFIG_SERVER_URL=http://config-server:8003
 
   logging-service-2:
     build: .
@@ -48,9 +60,13 @@ services:
     ports:
       - "8002:8001"
     depends_on:
+      - config-server
       - hz-1
       - hz-2
       - hz-3
+    environment:
+      - MY_URL=http://logging-service-2:8001
+      - CONFIG_SERVER_URL=http://config-server:8003
 
   logging-service-3:
     build: .
@@ -58,9 +74,13 @@ services:
     ports:
       - "8003:8001"
     depends_on:
+      - config-server
       - hz-1
       - hz-2
       - hz-3
+    environment:
+      - MY_URL=http://logging-service-3:8001
+      - CONFIG_SERVER_URL=http://config-server:8003
 
   postgres:
     image: postgres:latest
@@ -83,10 +103,20 @@ services:
     ports:
       - "8004:8002"
     depends_on:
+      config-server:
+        condition: service_started
       postgres:
         condition: service_healthy
+      hz-1:
+        condition: service_started
+      hz-2:
+        condition: service_started
+      hz-3:
+        condition: service_started
     environment:
       - DATABASE_URL=postgresql://user:password@postgres:5432/counter_db
+      - MY_URL=http://counter-service:8002
+      - CONFIG_SERVER_URL=http://config-server:8003
 
   facade-service:
     build: .
@@ -98,6 +128,8 @@ services:
       - logging-service-2
       - logging-service-3
       - counter-service
+      - hz-1
+      - hz-2
+      - hz-3
     environment:
-      - LOGGING_URLS=http://logging-service-1:8001,http://logging-service-2:8001,http://logging-service-3:8001
-      - COUNTER_URL=http://counter-service:8002
+      - CONFIG_SERVER_URL=http://config-server:8003

@@ -5,6 +5,8 @@ import aiohttp
 from contextlib import asynccontextmanager
 import os
 import random
+import hazelcast
+import json
 
 class MainSession:
     session: aiohttp.ClientSession = None
@@ -17,11 +19,39 @@ async def lifespan(app):
     main_session.session = aiohttp.ClientSession(connector=connector)
     yield
     await main_session.session.close()
+    client.shutdown()
 
 app = FastAPI(lifespan=lifespan)
 
-LOGGING_SERVICE_URLS = os.getenv("LOGGING_URLS", "http://localhost:8001").split(",")
-COUNTER_SERVICE_URL = os.getenv("COUNTER_URL", "http://localhost:8002")
+CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-server:8003")
+
+client = hazelcast.HazelcastClient(
+    cluster_name="lab4",
+    cluster_members=[
+        "hz-1:5701",
+        "hz-2:5701",
+        "hz-3:5701"
+    ]
+)
+
+transaction_queue = client.get_queue("transaction_queue")
+
+async def get_service_urls(service: str):
+    session = main_session.session
+
+    try:
+        async with session.get(f"{CONFIG_SERVER_URL}/give_services") as response:
+            if response.status == 200:
+                data = await response.json()
+                urls = data.get(service, [])
+
+                if not urls:
+                    raise HTTPException(status_code=503, detail=f"No {service} services")
+                
+                return urls
+            raise HTTPException(status_code=500, detail="Config server error")
+    except aiohttp.ClientError:
+        raise HTTPException(status_code=503, detail="Couldn't reach config server")
 
 logging_time = 0
 counter_time = 0
@@ -30,7 +60,7 @@ async def logging_service_wraper(session, request):
     global logging_time
     start = time.perf_counter()
 
-    urls = LOGGING_SERVICE_URLS.copy()
+    urls = await get_service_urls("logging")
     random.shuffle(urls)
 
     for url in urls:
@@ -55,27 +85,29 @@ async def counter_service_wraper(session, request):
     global counter_time
 
     start = time.perf_counter()
-    async with session.post(url=f"{COUNTER_SERVICE_URL}/transaction", json=request) as response:
-        status = response.status
-        data = await response.json() if status == 200 else await response.read()
+    
+    msg = json.dumps(request)
+    await asyncio.to_thread(transaction_queue.offer, msg)
 
-        end = time.perf_counter()
-        
-        time_taken = end - start
-        counter_time += time_taken
+    end = time.perf_counter()
+    
+    time_taken = end - start
+    counter_time += time_taken
 
-        return status, data
+    return 200, {"balance": "In progress..."}
 
 async def get_data_wraper(session, lst, path):
     urls = lst.copy()
     random.shuffle(urls)
 
+    timeout = aiohttp.ClientTimeout(total=2)
+
     for url in urls:
         try:
-            async with session.get(url=f"{url}{path}") as response:
+            async with session.get(url=f"{url}{path}", timeout=timeout) as response:
                 data = await response.json()
                 return response.status, data
-        except aiohttp.ClientError:
+        except (aiohttp.ClientError, asyncio.TimeoutError):
             print(f"[Facade] {url} is down.", flush=True)
             continue
     
@@ -109,7 +141,10 @@ async def process_transaction(user_id: int, amount: float):
 async def get_user_info(user_id: int):
     session = main_session.session
 
-    tasks = [get_data_wraper(session, LOGGING_SERVICE_URLS, f"/user/{user_id}"), get_data_wraper(session, [COUNTER_SERVICE_URL], f"/user/{user_id}")]
+    logging_urls = await get_service_urls("logging")
+    counter_urls = await get_service_urls("counter")
+
+    tasks = [get_data_wraper(session, logging_urls, f"/user/{user_id}"), get_data_wraper(session, counter_urls, f"/user/{user_id}")]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -132,12 +167,23 @@ async def get_user_info(user_id: int):
     return {"balance": counter_result, "transactions": logging_result}
 
 @app.get("/accounts")
-async def get_all_balances():
+async def get_all_balances(): # for now there is only 1 counter, but shuffle for future
     session = main_session.session
+    counter_urls = await get_service_urls("counter")
 
-    async with session.get(url=f"{COUNTER_SERVICE_URL}/accounts") as response:
-        balances = await response.json()
-        return balances
+    urls = counter_urls.copy()
+    random.shuffle(urls)
+
+    timeout = aiohttp.ClientTimeout(total=2)
+
+    for url in urls:
+        try:
+            async with session.get(url=f"{url}/accounts", timeout=timeout) as response:
+                balances = await response.json()
+                return balances
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            continue
+    raise HTTPException(status_code=503, detail="Counter service(s) are down.")
 
 @app.get("/time-taken")
 def get_time():
@@ -151,6 +197,9 @@ async def clear_up():
 
     session = main_session.session
 
+    logging_urls = await get_service_urls("logging")
+    counter_urls = await get_service_urls("counter")
+
     async def send_clear_up(session, lst, path):
         urls = lst.copy()
         random.shuffle(urls)
@@ -163,7 +212,7 @@ async def clear_up():
             except aiohttp.ClientError:
                 continue
 
-    await asyncio.gather(send_clear_up(session, LOGGING_SERVICE_URLS, "/state"),
-                         send_clear_up(session, [COUNTER_SERVICE_URL], "/state"))
+    await asyncio.gather(send_clear_up(session, logging_urls, "/state"),
+                         send_clear_up(session, counter_urls, "/state"))
 
     return {"status": "Successfully cleared"}
