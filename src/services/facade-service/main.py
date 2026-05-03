@@ -7,51 +7,92 @@ import os
 import random
 import hazelcast
 import json
+import consul
+import socket
+from urllib.parse import urlparse
+
+CONSUL_URL = os.getenv("CONSUL_URL", "http://consul:8500")
+consul_host = urlparse(CONSUL_URL).hostname
+consul_port = urlparse(CONSUL_URL).port
+
+consul_client = consul.Consul(host=consul_host, port=consul_port)
+
+SERVICE_HOST = socket.gethostbyname(socket.gethostname())
+PORT = int(os.getenv("PORT", 8000))
+SERVICE_ID = f"facade-{SERVICE_HOST}"
 
 class MainSession:
     session: aiohttp.ClientSession = None
 
 main_session = MainSession()
 
+client = None
+transaction_queue = None
+
 @asynccontextmanager
 async def lifespan(app):
+    global client, transaction_queue
+
+    _, hz_data = consul_client.kv.get("hazelcast_config")
+    _, mq_data = consul_client.kv.get("mq_config")
+
+    if (hz_data and mq_data):
+        hz_config = json.loads(hz_data["Value"].decode("utf-8"))
+        mq_config = json.loads(mq_data["Value"].decode("utf-8"))
+    else:
+        raise Exception("No hazelcast_config or mq_config found in Consul")
+
+    client = hazelcast.HazelcastClient(
+        cluster_name=hz_config["cluster_name"],
+        cluster_members=hz_config["cluster_members"]
+    )
+
+    transaction_queue = client.get_queue(mq_config["queue_name"])
+
     connector = aiohttp.TCPConnector(limit=0, limit_per_host=0)
     main_session.session = aiohttp.ClientSession(connector=connector)
+
+    health_check = consul.Check.http(f"http://{SERVICE_HOST}:{PORT}/health", interval='10s', timeout='5s')
+
+    consul_client.agent.service.register(
+        name="facade-service",
+        service_id=SERVICE_ID,
+        address=SERVICE_HOST,
+        port=PORT,
+        check=health_check
+    )
+
+    print(f"Registered in Consul as {SERVICE_ID}", flush=True)
+
     yield
+    consul_client.agent.service.deregister(SERVICE_ID)
     await main_session.session.close()
     client.shutdown()
 
 app = FastAPI(lifespan=lifespan)
 
-CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-server:8003")
-
-client = hazelcast.HazelcastClient(
-    cluster_name="lab4",
-    cluster_members=[
-        "hz-1:5701",
-        "hz-2:5701",
-        "hz-3:5701"
-    ]
-)
-
-transaction_queue = client.get_queue("transaction_queue")
-
 async def get_service_urls(service: str):
     session = main_session.session
+    consul_url = f"http://{consul_host}:{consul_port}/v1/health/service/{service}?passing=true"
 
     try:
-        async with session.get(f"{CONFIG_SERVER_URL}/give_services") as response:
-            if response.status == 200:
-                data = await response.json()
-                urls = data.get(service, [])
+        async with session.get(consul_url, timeout=2) as response:
+            if response.status != 200:
+                raise HTTPException(status_code=500, detail=f"Consul unsuccessful request: {response.status}")
+            instances = await response.json()
 
-                if not urls:
-                    raise HTTPException(status_code=503, detail=f"No {service} services")
-                
-                return urls
-            raise HTTPException(status_code=500, detail="Config server error")
-    except aiohttp.ClientError:
-        raise HTTPException(status_code=503, detail="Couldn't reach config server")
+        urls = []
+        for instance in instances:
+            address = instance["Service"]["Address"]
+            port = instance["Service"]["Port"]
+            urls.append(f"http://{address}:{port}")
+
+        if not urls:
+            raise HTTPException(status_code=503, detail=f"No healthy {service} instances")
+
+        return urls
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        raise HTTPException(status_code=500, detail=f"Error while getting {service} urls from Consul: {e}")
 
 logging_time = 0
 counter_time = 0
@@ -60,7 +101,7 @@ async def logging_service_wraper(session, request):
     global logging_time
     start = time.perf_counter()
 
-    urls = await get_service_urls("logging")
+    urls = await get_service_urls("logging-service")
     random.shuffle(urls)
 
     for url in urls:
@@ -141,8 +182,8 @@ async def process_transaction(user_id: int, amount: float):
 async def get_user_info(user_id: int):
     session = main_session.session
 
-    logging_urls = await get_service_urls("logging")
-    counter_urls = await get_service_urls("counter")
+    logging_urls = await get_service_urls("logging-service")
+    counter_urls = await get_service_urls("counter-service")
 
     tasks = [get_data_wraper(session, logging_urls, f"/user/{user_id}"), get_data_wraper(session, counter_urls, f"/user/{user_id}")]
 
@@ -169,7 +210,7 @@ async def get_user_info(user_id: int):
 @app.get("/accounts")
 async def get_all_balances(): # for now there is only 1 counter, but shuffle for future
     session = main_session.session
-    counter_urls = await get_service_urls("counter")
+    counter_urls = await get_service_urls("counter-service")
 
     urls = counter_urls.copy()
     random.shuffle(urls)
@@ -197,8 +238,8 @@ async def clear_up():
 
     session = main_session.session
 
-    logging_urls = await get_service_urls("logging")
-    counter_urls = await get_service_urls("counter")
+    logging_urls = await get_service_urls("logging-service")
+    counter_urls = await get_service_urls("counter-service")
 
     async def send_clear_up(session, lst, path):
         urls = lst.copy()
@@ -216,3 +257,7 @@ async def clear_up():
                          send_clear_up(session, counter_urls, "/state"))
 
     return {"status": "Successfully cleared"}
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}

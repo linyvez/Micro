@@ -4,3 +4,4 @@ aiohttp
 pydantic
 asyncpg
 hazelcast-python-client
+python-consul2

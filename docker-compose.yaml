@@ -1,18 +1,30 @@
 services:
-  config-server:
-    build: .
-    command: uvicorn src.services.config-server.main:app --host 0.0.0.0 --port 8003 --no-access-log
+  consul:
+    image: hashicorp/consul:latest
     ports:
-      - "8005:8003"
-    environment:
-      - CONFIG_SERVER_URL=http://config-server:8003
+      - "8500:8500"
+    command: "agent -dev -client=0.0.0.0"
+
+  consul-init:
+    image: hashicorp/consul:latest
+    restart: "no"
+    depends_on:
+      - consul
+    command: >
+      sh -c "
+        sleep 5 &&
+        consul kv put -http-addr=http://consul:8500 hazelcast_config '{\"cluster_name\": \"lab5\", \"cluster_members\": [\"hz-1:5701\", \"hz-2:5701\", \"hz-3:5701\"]}' &&
+        consul kv put -http-addr=http://consul:8500 mq_config '{\"queue_name\": \"transaction_queue\"}' &&
+        consul kv put -http-addr=http://consul:8500 db_config 'postgresql://user:password@postgres:5432/counter_db' &&
+        echo 'Consul initialized successfully...'
+      "
 
   hz-1:
     image: hazelcast/hazelcast:latest
     ports:
       - "5701:5701"
     environment:
-      - HZ_CLUSTERNAME=lab4
+      - HZ_CLUSTERNAME=lab5
       - HZ_NETWORK_PUBLICADDRESS=hz-1:5701
       - HZ_NETWORK_JOIN_MULTICAST_ENABLED=false
       - HZ_NETWORK_JOIN_TCP_IP_ENABLED=true
@@ -23,7 +35,7 @@ services:
     ports:
       - "5702:5701"
     environment:
-      - HZ_CLUSTERNAME=lab4
+      - HZ_CLUSTERNAME=lab5
       - HZ_NETWORK_PUBLICADDRESS=hz-2:5701
       - HZ_NETWORK_JOIN_MULTICAST_ENABLED=false
       - HZ_NETWORK_JOIN_TCP_IP_ENABLED=true
@@ -34,7 +46,7 @@ services:
     ports:
       - "5703:5701"
     environment:
-      - HZ_CLUSTERNAME=lab4
+      - HZ_CLUSTERNAME=lab5
       - HZ_NETWORK_PUBLICADDRESS=hz-3:5701
       - HZ_NETWORK_JOIN_MULTICAST_ENABLED=false
       - HZ_NETWORK_JOIN_TCP_IP_ENABLED=true
@@ -46,13 +58,19 @@ services:
     ports:
       - "8001:8001"
     depends_on:
-      - config-server
-      - hz-1
-      - hz-2
-      - hz-3
+      consul:
+        condition: service_started
+      consul-init:
+        condition: service_completed_successfully
+      hz-1:
+        condition: service_started
+      hz-2:
+        condition: service_started
+      hz-3:
+        condition: service_started
     environment:
-      - MY_URL=http://logging-service-1:8001
-      - CONFIG_SERVER_URL=http://config-server:8003
+      - PORT=8001
+      - CONSUL_URL=http://consul:8500
 
   logging-service-2:
     build: .
@@ -60,13 +78,19 @@ services:
     ports:
       - "8002:8001"
     depends_on:
-      - config-server
-      - hz-1
-      - hz-2
-      - hz-3
+      consul:
+        condition: service_started
+      consul-init:
+        condition: service_completed_successfully
+      hz-1:
+        condition: service_started
+      hz-2:
+        condition: service_started
+      hz-3:
+        condition: service_started
     environment:
-      - MY_URL=http://logging-service-2:8001
-      - CONFIG_SERVER_URL=http://config-server:8003
+      - PORT=8001
+      - CONSUL_URL=http://consul:8500
 
   logging-service-3:
     build: .
@@ -74,13 +98,19 @@ services:
     ports:
       - "8003:8001"
     depends_on:
-      - config-server
-      - hz-1
-      - hz-2
-      - hz-3
+      consul:
+        condition: service_started
+      consul-init:
+        condition: service_completed_successfully
+      hz-1:
+        condition: service_started
+      hz-2:
+        condition: service_started
+      hz-3:
+        condition: service_started
     environment:
-      - MY_URL=http://logging-service-3:8001
-      - CONFIG_SERVER_URL=http://config-server:8003
+      - PORT=8001
+      - CONSUL_URL=http://consul:8500
 
   postgres:
     image: postgres:latest
@@ -103,8 +133,10 @@ services:
     ports:
       - "8004:8002"
     depends_on:
-      config-server:
+      consul:
         condition: service_started
+      consul-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       hz-1:
@@ -114,9 +146,8 @@ services:
       hz-3:
         condition: service_started
     environment:
-      - DATABASE_URL=postgresql://user:password@postgres:5432/counter_db
-      - MY_URL=http://counter-service:8002
-      - CONFIG_SERVER_URL=http://config-server:8003
+      - PORT=8002
+      - CONSUL_URL=http://consul:8500
 
   facade-service:
     build: .
@@ -124,12 +155,24 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - logging-service-1
-      - logging-service-2
-      - logging-service-3
-      - counter-service
-      - hz-1
-      - hz-2
-      - hz-3
+      consul:
+        condition: service_started
+      consul-init:
+        condition: service_completed_successfully
+      logging-service-1:
+        condition: service_started
+      logging-service-2:
+        condition: service_started
+      logging-service-3:
+        condition: service_started
+      counter-service:
+        condition: service_started
+      hz-1:
+        condition: service_started
+      hz-2:
+        condition: service_started
+      hz-3:
+        condition: service_started
     environment:
-      - CONFIG_SERVER_URL=http://config-server:8003
+      - PORT=8000
+      - CONSUL_URL=http://consul:8500

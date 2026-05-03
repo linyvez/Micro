@@ -1,48 +1,61 @@
 from fastapi import FastAPI
 from src.models.models import TransactionMsg
 import hazelcast
-import asyncio
 import os
-import aiohttp
 from contextlib import asynccontextmanager
+import consul
+import socket
+from urllib.parse import urlparse
+import json
 
-CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-server:8003")
-MY_URL = os.getenv("MY_URL", "http://logging-service:8001")
+CONSUL_URL = os.getenv("CONSUL_URL", "http://consul:8500")
+consul_host = urlparse(CONSUL_URL).hostname
+consul_port = urlparse(CONSUL_URL).port
 
-async def register_in_config():
-    info = {"service": "logging", "url": MY_URL}
+consul_client = consul.Consul(host=consul_host, port=consul_port)
 
-    async with aiohttp.ClientSession() as session:
-        for i in range(5):
-            try:
-                async with session.post(f"{CONFIG_SERVER_URL}/add_service", json=info) as response:
-                    if response.status == 200:
-                        print(f"Registered in config server")
-                        return
-            except aiohttp.ClientError:
-                print(f"Couldn't register on {i + 1} try")
-                await asyncio.sleep(2)
-        print("Didn't register in config after 5 attempts")
+SERVICE_HOST = socket.gethostbyname(socket.gethostname())
+PORT = int(os.getenv("PORT", 8001))
+SERVICE_ID = f"logging-{SERVICE_HOST}"
+
+client = None
+transactions = None
 
 @asynccontextmanager
 async def lifespan(app):
-    await register_in_config()
+    global client, transactions
+
+    _, data = consul_client.kv.get("hazelcast_config")
+
+    if data and data.get("Value"):
+        hz_config = json.loads(data["Value"].decode("utf-8"))
+    else:
+        raise Exception("No hazelcast_config found in Consul")
+    
+    client = hazelcast.HazelcastClient(
+        cluster_name=hz_config["cluster_name"],
+        cluster_members=hz_config["cluster_members"]
+    )
+
+    transactions = client.get_map("transactions").blocking()
+
+    health_check = consul.Check.http(f"http://{SERVICE_HOST}:{PORT}/health", interval='10s', timeout='5s')
+
+    consul_client.agent.service.register(
+        name="logging-service",
+        service_id=SERVICE_ID,
+        address=SERVICE_HOST,
+        port=PORT,
+        check=health_check
+    )
+
+    print(f"Registered in Consul as {SERVICE_ID}", flush=True)
 
     yield
+    consul_client.agent.service.deregister(SERVICE_ID)
     client.shutdown()
 
 app = FastAPI(lifespan=lifespan)
-
-client = hazelcast.HazelcastClient(
-    cluster_name="lab4",
-    cluster_members=[
-        "hz-1:5701",
-        "hz-2:5701",
-        "hz-3:5701"
-    ]
-)
-
-transactions = client.get_map("transactions").blocking()
 
 @app.post("/logs")
 def save_message(transaction_data: TransactionMsg):
@@ -58,3 +71,7 @@ def get_messages(user_id: int):
 @app.delete("/state")
 def clear_up():
     transactions.clear()
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}

@@ -2,40 +2,26 @@ from fastapi import FastAPI, HTTPException
 import asyncpg
 import asyncio
 import os
-import aiohttp
 from contextlib import asynccontextmanager
 import hazelcast
 import json
+import consul
+import socket
+from urllib.parse import urlparse
 
-client = hazelcast.HazelcastClient(
-    cluster_name="lab4",
-    cluster_members=[
-        "hz-1:5701",
-        "hz-2:5701",
-        "hz-3:5701"
-    ]
-)
+CONSUL_URL = os.getenv("CONSUL_URL", "http://consul:8500")
+consul_host = urlparse(CONSUL_URL).hostname
+consul_port = urlparse(CONSUL_URL).port
 
-transaction_queue = client.get_queue("transaction_queue")
+consul_client = consul.Consul(host=consul_host, port=consul_port)
 
-CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-server:8003")
-MY_URL = os.getenv("MY_URL", "http://counter-service:8002")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@postgres:5432/counter_db")
+SERVICE_HOST = socket.gethostbyname(socket.gethostname())
+PORT = int(os.getenv("PORT", 8002))
+SERVICE_ID = f"counter-{SERVICE_HOST}"
 
-async def register_in_config():
-    info = {"service": "counter", "url": MY_URL}
-
-    async with aiohttp.ClientSession() as session:
-        for i in range(5):
-            try:
-                async with session.post(f"{CONFIG_SERVER_URL}/add_service", json=info) as response:
-                    if response.status == 200:
-                        print(f"Registered in config server")
-                        return
-            except aiohttp.ClientError:
-                print(f"Couldn't register on {i + 1} try")
-                await asyncio.sleep(2)
-        print("Didn't register in config after 5 attempts")
+client = None
+transaction_queue = None
+DATABASE_URL = None
 
 async def consume_msg(app):
     def fetch_msg():
@@ -61,7 +47,25 @@ async def consume_msg(app):
 
 @asynccontextmanager
 async def lifespan(app):
-    await register_in_config()
+    global client, transaction_queue, DATABASE_URL
+
+    _, hz_data = consul_client.kv.get("hazelcast_config")
+    _, mq_data = consul_client.kv.get("mq_config")
+    _, db_data = consul_client.kv.get("db_config")
+
+    if (hz_data and mq_data and db_data):
+        hz_config = json.loads(hz_data["Value"].decode("utf-8"))
+        mq_config = json.loads(mq_data["Value"].decode("utf-8"))
+        DATABASE_URL = db_data["Value"].decode("utf-8")
+    else:
+        raise Exception("No hazelcast_config, mq_config or db_config found in Consul")
+
+    client = hazelcast.HazelcastClient(
+        cluster_name=hz_config["cluster_name"],
+        cluster_members=hz_config["cluster_members"]
+    )
+
+    transaction_queue = client.get_queue(mq_config["queue_name"])
 
     app.state.pool = await asyncpg.create_pool(DATABASE_URL)
 
@@ -73,11 +77,25 @@ async def lifespan(app):
             )
         ''')
     
-    task = asyncio.create_task(consume_msg(app))
+    health_check = consul.Check.http(f"http://{SERVICE_HOST}:{PORT}/health", interval='10s', timeout='5s')
+
+    consul_client.agent.service.register(
+        name="counter-service",
+        service_id=SERVICE_ID,
+        address=SERVICE_HOST,
+        port=PORT,
+        check=health_check
+    )
+
+    print(f"Registered in Consul as {SERVICE_ID}", flush=True)
+    
+    app.state.consumer_tasks = [asyncio.create_task(consume_msg(app)) for _ in range(20)]
 
     yield
-    task.cancel()
+    for task in app.state.consumer_tasks:
+        task.cancel()
     await app.state.pool.close()
+    consul_client.agent.service.deregister(SERVICE_ID)
     client.shutdown()
 
 app = FastAPI(lifespan=lifespan)
@@ -105,3 +123,7 @@ async def clear_up():
         await connection.execute("TRUNCATE TABLE users_balance")
     
     return {"message": "Successfully cleared users_balance table."}
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
